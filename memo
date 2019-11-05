@@ -1,0 +1,220 @@
+■prometheus起動
+cd /opt/prometheus
+HOSTNAME=$(hostname) docker stack deploy -c docker-stack.yml prom
+
+■node_exporter
+wget https://github.com/prometheus/node_exporter/releases/download/v0.18.1/node_exporter-0.18.1.linux-386.tar.gz
+tar xvfz node_exporter-*.tar.gz
+ln -s node_exporter-0.18.1.linux-386 node_exporter
+vim /opt/node_exporter/node_exporter.sh
+ll node_exporter
+ll /opt/node_exporter
+ll node_exporter-0.18.1.linux-386
+chown -R root: node_exporter-0.18.1.linux-386
+rm -f node_exporter-0.18.1.linux-386.tar.gz
+vim /etc/init.d/node_exporter
+ll node_exporter-0.18.1.linux-386
+chmod +x node_exporter-0.18.1.linux-386/node_exporter.sh
+ll node_exporter-0.18.1.linux-386
+chmod +x /etc/init.d/node_exporter
+chkconfig --add node_exporter
+/etc/init.d/node_exporter start
+bash -xv /etc/init.d/node_exporter start
+view /var/log/node_exporter.log
+/etc/init.d/node_exporter start &
+
+■apache_exporter
+yum install golang -y
+vim ~/.bashrc
+----
+export GOPATH=$HOME/go
+export PATH=$PATH:$GOROOT/bin:$GOPATH/bin
+----
+source ~/.bashrc
+go get github.com/Lusitaniae/apache_exporter
+ln -s ~/go/bin/apache_exporter /usr/bin
+
+vim /etc/init.d/apache_exporter
+-----
+/usr/bin/apache_exporter &
+-----
+chmod +x /usr/bin/apache_exporter
+chmod +x /etc/init.d/apache_exporter
+cd /etc/rc3.d/
+ln -s ../init.d/apache_exporter S99apache_exporter
+
+vim /etc/httpd/conf.d/server-status.conf
+-----
+<Location /server-status>
+    SetHandler server-status
+    Order deny,allow
+    Deny from all
+    Allow from localhost
+</Location>
+-----
+
+
+# cat /opt/prometheus/prometheus.yml
+----
+# my global config
+global:
+  scrape_interval:     15s # By default, scrape targets every 15 seconds.
+  evaluation_interval: 15s # By default, scrape targets every 15 seconds.
+  # scrape_timeout is set to the global default (10s).
+
+  # Attach these labels to any time series or alerts when communicating with
+  # external systems (federation, remote storage, Alertmanager).
+  external_labels:
+      monitor: 'xxx-project'
+
+# Load and evaluate rules in this file every 'evaluation_interval' seconds.
+rule_files:
+  - 'alert.rules'
+  # - "first.rules"
+  # - "second.rules"
+
+# alert
+
+alerting:
+  alertmanagers:
+  - static_configs:
+    - targets:
+       - localhost:9093
+
+# A scrape configuration containing exactly one endpoint to scrape:
+# Here it's Prometheus itself.
+scrape_configs:
+  # The job name is added as a label `job=<job_name>` to any timeseries scraped from this config.
+
+ - job_name: 'ec2_nodes'
+   ec2_sd_configs:
+     - region: ap-northeast-1
+       access_key: aaa
+       secret_key: bbb
+       port: 9100
+   relabel_configs:
+     - source_labels: [__meta_ec2_tag_Env]
+       regex: (stg|prod)
+       action: keep
+     - source_labels: [__meta_ec2_tag_Name]
+       target_label: instance
+     - source_labels: [__meta_ec2_private_ip]
+       target_label: privateip
+
+ - job_name: 'apache'
+   ec2_sd_configs:
+     - region: ap-northeast-1
+       access_key: aaa
+       secret_key: bbb
+       port: 9200
+
+
+
+# cat /opt/prometheus/alert.rules
+---------
+groups:
+- name: targets
+  rules:
+  - alert: instance_down
+    expr: up == 0
+    for: 30s
+    labels:
+      severity: critical
+    annotations:
+      summary: "Monitor instance non-operational"
+      description: "Instance {{ $labels.instance }} {{ $labels.privateip }} is down."
+
+- name: host
+  rules:
+  - alert: cpu_used
+    expr: 100 * (1 - avg(rate(node_cpu_seconds_total{job='ec2_nodes',mode='idle'}[1m])) BY (instance,privateip)) > 70
+    for: 30s
+    labels:
+      severity: critical
+    annotations:
+      summary: "cpu {{ $labels.instance }} used over 80%"
+      description: "cpu of {{ $labels.instance }} {{ $labels.privateip }} has been used over 80% for more than 1 minutes."
+
+  - alert: cpu_load
+    expr: node_load1 > 2.0
+    for: 30s
+    labels:
+      severity: warning
+    annotations:
+      summary: "Server under high load"
+      description: "Instance is under high load, the avg load 1m is at {{ $value}}. Reported by instance {{ $labels.instance }} {{ $labels.privateip }} of job {{ $labels.job }}."
+
+  - alert: memory_used
+    expr: 100 * (1 - node_memory_MemFree_bytes{job='ec2_nodes'} / node_memory_MemTotal_bytes{job='ec2_nodes'}) > 80
+    for: 30s
+    labels:
+      severity: warning
+    annotations:
+      summary: "memory {{ $labels.instance }} used over 80%"
+      description: "memory of {{ $labels.instance }} {{ $labels.privateip }} has been used over 80% for more than 1 minutes."
+
+  - alert: storage_used
+    expr: (node_filesystem_size_bytes - node_filesystem_free_bytes) / node_filesystem_size_bytes * 100 > 85
+    for: 30s
+    labels:
+      severity: warning
+    annotations:
+      summary: "Server storage is almost full"
+      description: "Instance storage usage is {{ humanize $value}}%. Reported by instance {{ $labels.instance }} {{ $labels.privateip }} of job {{ $labels.job }}."
+
+- name: apache_exporter
+  rules:
+  - alert: apache_workers
+    expr: apache_workers{job="apache",state="busy"} > 70
+    for: 2m
+    labels:
+      severity: critical
+    annotations:
+      summary: "apache {{ $labels.instance }} Apache workers over 70"
+      description: "apache server {{ $labels.instance }}  {{ $labels.privateip }} has been used over 70 Apache workers for more than 2 minutes."
+
+- name: blackbox_exporter
+  rules:
+  - alert: service_minitor
+    expr: probe_http_status_code{job='service_minitor'} != 200
+    for: 60s
+    labels:
+      severity: critical
+    annotations:
+      summary: "{{ $labels.url }}: http request not return 200"
+      description: "{{ $labels.url }} http request not return 200 for more than 60 seconds."
+
+- name: app_error
+  rules:
+  - alert: Error
+    expr: error_message > 0
+    for: 1s
+    labels:
+      severity: warn
+    annotations:
+      summary: an error happened.
+---------
+
+cat /opt/alertmanager/alertmanager.yml
+---------
+global:
+  resolve_timeout: 5m
+  smtp_from: 'prometheusAlert@example.com'
+  smtp_smarthost: 'localhost:25'
+route:
+  group_by: ['alertname']
+  group_wait: 10s
+  group_interval: 10s
+  repeat_interval: 1h
+  #receiver: 'web.hook'
+  #receiver: 'mailtest'
+  receiver: 'prometheus-msteams'
+receivers:
+- name: 'prometheus-msteams'
+  email_configs:
+    - to: 'aaa@bbb'
+      require_tls: false
+  webhook_configs: # https://prometheus.io/docs/alerting/configuration/#webhook_config
+  - send_resolved: true
+    url: 'http://localhost:2000/alertmanager'
+---------
